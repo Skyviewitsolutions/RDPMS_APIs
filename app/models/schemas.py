@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, AliasChoices, model_validator
+from pydantic import BaseModel, Field, AliasChoices, model_validator, field_validator
 from typing import List, Optional, Union, Generic, TypeVar
 from datetime import datetime
 from enum import Enum as PyEnum
@@ -273,6 +273,25 @@ class StationResponse(BaseModel):
 
 
 # ─── Gateway ──────────────────────────────────────────────────────────────────
+
+class GatewayCreate(BaseModel):
+    stngw_id: str = Field(..., description="4-Byte hexadecimal station gateway ID (8 characters e.g. 01011200)")
+    imei: Optional[str] = Field(None, max_length=20, description="Modem IMEI string (optional)")
+    station_id: Optional[int] = Field(None, description="Station ID this gateway belongs to (optional)")
+    mtls_cn: Optional[str] = Field(None, max_length=200, description="mTLS certificate Common Name (optional)")
+
+    @field_validator("stngw_id")
+    @classmethod
+    def validate_stngw_id(cls, v: str) -> str:
+        cleaned = v.strip().upper()
+        if len(cleaned) != 8 or not all(c in "0123456789ABCDEF" for c in cleaned):
+            raise ValueError("Gateway ID must be exactly 8 hexadecimal characters (0-9, A-F)")
+        return cleaned
+
+
+class LinkStationRequest(BaseModel):
+    station_id: Optional[int] = None
+
 
 class GatewayResponse(BaseModel):
     id: int

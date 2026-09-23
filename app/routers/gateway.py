@@ -9,7 +9,15 @@ from typing import List, Optional, Any, Union
 from app.database import get_db
 from app.services.websocket_manager import safe_notify_dashboard
 from app.models.models import Gateway, Telemetry, Zone, Division, Station, AssetParameter, User
-from app.models.schemas import GatewayDataPayload, TelemetryResponse, GatewayResponse, GatewayListResponse, StandardResponse
+from app.models.schemas import (
+    GatewayDataPayload,
+    TelemetryResponse,
+    GatewayResponse,
+    GatewayListResponse,
+    GatewayCreate,
+    LinkStationRequest,
+    StandardResponse,
+)
 from app.auth_utils import get_current_user
 
 router = APIRouter(prefix="/gateway", tags=["Gateway Telemetry"])
@@ -377,27 +385,87 @@ def get_gateway_telemetry(
     }
 
 
-@router.post("/{stngw_id}/link-station", response_model=StandardResponse[GatewayResponse])
-def link_gateway_station(
-    stngw_id: str,
+@router.post("/", response_model=StandardResponse[GatewayResponse], status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=StandardResponse[GatewayResponse], status_code=status.HTTP_201_CREATED)
+def create_gateway(
+    payload: GatewayCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """
-    Manually trigger station auto-assignment for an existing gateway.
-    Useful for back-filling gateways registered before their station was added.
+    Manually provision/register a new Station Gateway.
+    If station_id is not explicitly provided, attempts to auto-resolve
+    the station from the 4-byte stngw_id hierarchy (Zone, Division, Station).
+    """
+    stngw_id = payload.stngw_id.upper().strip()
+
+    # 1. Prevent duplicates (stngw_id is unique across Indian Railways)
+    existing = db.query(Gateway).filter(Gateway.stngw_id == stngw_id).first()
+    if existing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Gateway with ID '{stngw_id}' already exists."
+        )
+
+    # 2. Station assignment
+    station_id = payload.station_id
+    if station_id:
+        stn = db.query(Station).filter(Station.id == station_id).first()
+        if not stn:
+            raise HTTPException(status_code=404, detail=f"Station with ID {station_id} not found.")
+    else:
+        # Fallback: auto-resolve station from hex hierarchy
+        station_id = _resolve_station_from_stngw_id(stngw_id, db)
+
+    # 3. Create Gateway row
+    gateway = Gateway(
+        stngw_id=stngw_id,
+        imei=payload.imei.strip() if payload.imei else None,
+        station_id=station_id,
+        mtls_cn=payload.mtls_cn.strip() if payload.mtls_cn else None,
+    )
+    db.add(gateway)
+    db.commit()
+    db.refresh(gateway)
+
+    safe_notify_dashboard("gateway_created")
+
+    return {
+        "status": True,
+        "message": "Gateway added successfully",
+        "data": gateway
+    }
+
+
+@router.post("/{stngw_id}/link-station", response_model=StandardResponse[GatewayResponse])
+def link_gateway_station(
+    stngw_id: str,
+    payload: Optional[LinkStationRequest] = None,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Link a gateway to a station.
+    If payload with station_id is provided, links directly to that station.
+    Otherwise attempts auto-assignment by decoding stngw_id.
     """
     gateway = _check_stngw_id_access(stngw_id, current_user, db, action="write")
     if not gateway:
         raise HTTPException(status_code=404, detail=f"Gateway '{stngw_id}' not found")
 
-    station_id = _resolve_station_from_stngw_id(stngw_id.upper(), db)
-    if station_id is None:
-        raise HTTPException(
-            status_code=422,
-            detail=f"Could not resolve a station for stngw_id '{stngw_id}'. "
-                   "Make sure the zone, division, and station exist in the database."
-        )
+    station_id = payload.station_id if payload and payload.station_id else None
+    if station_id:
+        stn = db.query(Station).filter(Station.id == station_id).first()
+        if not stn:
+            raise HTTPException(status_code=404, detail=f"Station with ID {station_id} not found")
+    else:
+        station_id = _resolve_station_from_stngw_id(stngw_id.upper(), db)
+        if station_id is None:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Could not resolve a station for stngw_id '{stngw_id}'. "
+                       "Make sure the zone, division, and station exist in the database."
+            )
 
     gateway.station_id = station_id
     db.commit()
@@ -405,7 +473,7 @@ def link_gateway_station(
     safe_notify_dashboard("gateway_updated")
     return {
         "status": True,
-        "message": "Success",
+        "message": "Station linked successfully",
         "data": gateway
     }
 
