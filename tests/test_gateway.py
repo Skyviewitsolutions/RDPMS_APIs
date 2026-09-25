@@ -291,3 +291,62 @@ def test_list_gateways_returns_hierarchy():
     assert "zone_code" in first
     assert "division_code" in first
     assert "station_code" in first
+
+
+def test_update_gateway_imei_and_link():
+    db = TestingSessionLocal()
+    # Create unlinked gateway
+    test_gw_id = "0102030B"
+    gw = Gateway(stngw_id=test_gw_id, station_id=None, imei=None)
+    db.add(gw)
+    db.commit()
+
+    # Link station AND set new IMEI
+    new_imei = "86749070579933"
+    res = client.post(
+        f"/gateway/{test_gw_id}/link-station",
+        json={"imei": new_imei}
+    )
+    assert res.status_code == 200
+    data = res.json()["data"]
+    assert data["stngw_id"] == test_gw_id
+    assert data["station_id"] == 1
+    assert data["imei"] == new_imei
+    assert res.json()["status"] is True
+
+    # Attempt to use duplicate IMEI on another gateway
+    other_gw_id = "0102030C"
+    other_gw = Gateway(stngw_id=other_gw_id, station_id=None, imei=None)
+    db.add(other_gw)
+    db.commit()
+
+    dup_res = client.post(
+        f"/gateway/{other_gw_id}/link-station",
+        json={"imei": new_imei}
+    )
+    assert dup_res.status_code == 400
+    msg = dup_res.json().get("message") or dup_res.json().get("detail")
+    assert "already exists" in msg
+
+    # Invalid IMEI format (less than 10 digits)
+    bad_res = client.post(
+        f"/gateway/{other_gw_id}/link-station",
+        json={"imei": "12345"}
+    )
+    assert bad_res.status_code == 422
+
+    db.close()
+
+
+def test_put_update_gateway():
+    # Update gateway using PUT /gateway/{stngw_id}
+    test_gw_id = "0102030B"
+    updated_imei = "86749070579944"
+    res = client.put(
+        f"/gateway/{test_gw_id}",
+        json={"imei": updated_imei}
+    )
+    assert res.status_code == 200
+    data = res.json()["data"]
+    assert data["stngw_id"] == test_gw_id
+    assert data["imei"] == updated_imei

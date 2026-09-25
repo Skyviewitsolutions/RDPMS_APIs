@@ -326,6 +326,36 @@ class GatewayHierarchyPreviewResponse(BaseModel):
 
 class LinkStationRequest(BaseModel):
     station_id: Optional[int] = None
+    imei: Optional[str] = None
+
+    @field_validator("imei")
+    @classmethod
+    def validate_imei(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        cleaned = v.strip()
+        if not cleaned:
+            return None
+        if not (10 <= len(cleaned) <= 20 and cleaned.isdigit()):
+            raise ValueError("IMEI must be a valid numeric string between 10 and 20 digits")
+        return cleaned
+
+
+class GatewayUpdate(BaseModel):
+    imei: Optional[str] = None
+    station_id: Optional[int] = None
+
+    @field_validator("imei")
+    @classmethod
+    def validate_imei(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        cleaned = v.strip()
+        if not cleaned:
+            return None
+        if not (10 <= len(cleaned) <= 20 and cleaned.isdigit()):
+            raise ValueError("IMEI must be a valid numeric string between 10 and 20 digits")
+        return cleaned
 
 
 class GatewayResponse(BaseModel):

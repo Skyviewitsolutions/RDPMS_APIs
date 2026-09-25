@@ -15,6 +15,7 @@ from app.models.schemas import (
     GatewayResponse,
     GatewayListResponse,
     GatewayCreate,
+    GatewayUpdate,
     LinkStationRequest,
     GatewayHierarchyPreviewResponse,
     StandardResponse,
@@ -587,7 +588,8 @@ def link_gateway_station(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Link or re-link a gateway to its authoritative station derived from stngw_id.
+    Link or re-link a gateway to its authoritative station derived from stngw_id,
+    and optionally update its IMEI.
     Validates that the target station matches the encoded hierarchy.
     """
     clean_stngw_id = stngw_id.upper().strip()
@@ -609,13 +611,88 @@ def link_gateway_station(
             detail=f"Cannot link gateway '{clean_stngw_id}' to station ID {payload.station_id}. It is encoded to station ID {resolved_station_id} ({hierarchy['station']['name']})."
         )
 
+    # Check and update IMEI if provided
+    if payload and payload.imei is not None:
+        new_imei = payload.imei.strip() if payload.imei else None
+        if new_imei:
+            existing_imei = db.query(Gateway).filter(
+                Gateway.imei == new_imei,
+                Gateway.stngw_id != clean_stngw_id
+            ).first()
+            if existing_imei:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Gateway with IMEI '{new_imei}' already exists ({existing_imei.stngw_id})."
+                )
+            gateway.imei = new_imei
+        else:
+            gateway.imei = None
+
     gateway.station_id = resolved_station_id
     db.commit()
     db.refresh(gateway)
     safe_notify_dashboard("gateway_updated")
     return {
         "status": True,
-        "message": "Station linked successfully",
+        "message": "Gateway updated successfully" if (payload and payload.imei is not None) else "Station linked successfully",
+        "data": gateway
+    }
+
+
+@router.put("/{stngw_id}", response_model=StandardResponse[GatewayResponse])
+def update_gateway(
+    stngw_id: str,
+    payload: GatewayUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Update gateway configuration (IMEI and/or station link).
+    """
+    clean_stngw_id = stngw_id.upper().strip()
+    gateway = _check_stngw_id_access(clean_stngw_id, current_user, db, action="write")
+    if not gateway:
+        raise HTTPException(status_code=404, detail=f"Gateway '{clean_stngw_id}' not found")
+
+    hierarchy = _decode_and_resolve_hierarchy(clean_stngw_id, db)
+    if not hierarchy["can_register"] or not hierarchy["resolved_station_id"]:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Could not resolve station for '{clean_stngw_id}': {hierarchy['error']}"
+        )
+
+    resolved_station_id = hierarchy["resolved_station_id"]
+    if payload.station_id and payload.station_id != resolved_station_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot link gateway '{clean_stngw_id}' to station ID {payload.station_id}. It is encoded to station ID {resolved_station_id} ({hierarchy['station']['name']})."
+        )
+
+    if payload.imei is not None:
+        new_imei = payload.imei.strip() if payload.imei else None
+        if new_imei:
+            existing_imei = db.query(Gateway).filter(
+                Gateway.imei == new_imei,
+                Gateway.stngw_id != clean_stngw_id
+            ).first()
+            if existing_imei:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Gateway with IMEI '{new_imei}' already exists ({existing_imei.stngw_id})."
+                )
+            gateway.imei = new_imei
+        else:
+            gateway.imei = None
+
+    if payload.station_id or gateway.station_id is None:
+        gateway.station_id = resolved_station_id
+
+    db.commit()
+    db.refresh(gateway)
+    safe_notify_dashboard("gateway_updated")
+    return {
+        "status": True,
+        "message": "Gateway updated successfully",
         "data": gateway
     }
 
