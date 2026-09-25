@@ -13,7 +13,7 @@ from app.services.websocket_manager import websocket_manager, safe_notify_dashbo
 
 from app.constants import ASSET_TYPE_DISPLAY_GROUPS, ASSET_TYPE_MAP, PARAMETER_TYPE_MAP
 from app.database import get_db
-from app.models.models import AlertEvent, Asset, Division, Station, Zone, AssetTypeMaster, AlertCauseMaster, AssetInventory, MaintenanceMode, Role, SlaveCard, Gateway, User
+from app.models.models import AlertEvent, Asset, AssetParameter, Division, Station, Zone, AssetTypeMaster, AlertCauseMaster, AssetInventory, MaintenanceMode, Role, SlaveCard, Gateway, User
 from app.auth_utils import get_current_user
 from app.models.schemas import (
     AlertEventCreate,
@@ -34,7 +34,9 @@ from app.models.schemas import (
     AlertSummaryRow,
     AssetTypeGroupOption,
     AssetTypeOption,
+    ChannelFilterOption,
     DropdownOption,
+    SlaveCardFilterOption,
     StandardResponse
 )
 
@@ -1315,6 +1317,71 @@ def get_alert_filters(db: Session = Depends(get_db)):
             zone_name=z.zone_name if z else None,
         ))
 
+    # ── Slave Cards ──────────────────────────────────────────────────────────
+    slave_cards_db = (
+        db.query(SlaveCard)
+        .join(Gateway, Gateway.id == SlaveCard.gateway_id)
+        .order_by(Gateway.stngw_id, SlaveCard.card_address)
+        .all()
+    )
+    slave_cards_list = []
+    for sc in slave_cards_db:
+        g = sc.gateway
+        s = stations_by_id.get(g.station_id) if g and g.station_id else None
+        d = divisions_by_id.get(s.division_id) if s else None
+        z = zones_by_id.get(d.zone_id) if d else None
+        ct = sc.card_type or ""
+        label = f"{sc.card_address} ({ct})" if ct else sc.card_address
+        slave_cards_list.append(SlaveCardFilterOption(
+            id=sc.id,
+            label=label,
+            value=sc.card_address,
+            card_address=sc.card_address,
+            card_type=sc.card_type,
+            gateway_id=sc.gateway_id,
+            stngw_id=g.stngw_id if g else None,
+            station_id=s.id if s else None,
+            station_code=s.station_code if s else None,
+            station_name=s.station_name if s else None,
+            division_id=d.id if d else None,
+            division_code=d.division_code if d else None,
+            zone_id=z.id if z else None,
+            zone_code=z.zone_code if z else None,
+        ))
+
+    # ── Channel Assignments ───────────────────────────────────────────────────
+    channels_db = (
+        db.query(AssetParameter)
+        .filter(AssetParameter.slave_card_id.isnot(None))
+        .order_by(AssetParameter.slave_card_id, AssetParameter.channel_number)
+        .all()
+    )
+    channel_assignments_list = []
+    for ch in channels_db:
+        sc = ch.slave_card
+        g = sc.gateway if sc else None
+        s = stations_by_id.get(g.station_id) if g and g.station_id else None
+        ch_label = ch.channel_number or "?"
+        asset_code = ch.asset.asset_number_code if ch.asset else None
+        label = f"{ch_label} → {ch.para_id}" + (f" ({asset_code})" if asset_code else "")
+        channel_assignments_list.append(ChannelFilterOption(
+            id=ch.id,
+            label=label,
+            value=ch.para_id,
+            para_id=ch.para_id,
+            channel_number=ch.channel_number,
+            slave_card_id=ch.slave_card_id,
+            card_address=sc.card_address if sc else None,
+            card_type=sc.card_type if sc else None,
+            gateway_id=g.id if g else None,
+            stngw_id=g.stngw_id if g else None,
+            station_id=s.id if s else None,
+            station_code=s.station_code if s else None,
+            station_name=s.station_name if s else None,
+            asset_id=ch.asset_id,
+            asset_number_code=asset_code,
+        ))
+
     response_data = AlertFiltersResponse(
         zones=zones_list,
         divisions=divisions_list,
@@ -1331,6 +1398,8 @@ def get_alert_filters(db: Session = Depends(get_db)):
         roles=roles_list,
         card_types=card_types_list,
         gateways=gateways_list,
+        slave_cards=slave_cards_list,
+        channel_assignments=channel_assignments_list,
     )
     return {
         "status": True,

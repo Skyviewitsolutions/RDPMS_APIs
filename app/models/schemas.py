@@ -953,6 +953,43 @@ class AlertFilterOption(BaseModel):
     value: str
 
 
+class SlaveCardFilterOption(BaseModel):
+    """Lightweight slave card option for universal filter dropdowns."""
+    id: int
+    label: str          # e.g. "81 (Voltage)"
+    value: str          # card_address e.g. "81"
+    card_address: str
+    card_type: Optional[str] = None
+    gateway_id: Optional[int] = None
+    stngw_id: Optional[str] = None
+    station_id: Optional[int] = None
+    station_code: Optional[str] = None
+    station_name: Optional[str] = None
+    division_id: Optional[int] = None
+    division_code: Optional[str] = None
+    zone_id: Optional[int] = None
+    zone_code: Optional[str] = None
+
+
+class ChannelFilterOption(BaseModel):
+    """Lightweight channel assignment option for universal filter dropdowns."""
+    id: int
+    label: str          # e.g. "CH1 → P001A01020102"
+    value: str          # para_id
+    para_id: str
+    channel_number: Optional[str] = None
+    slave_card_id: Optional[int] = None
+    card_address: Optional[str] = None
+    card_type: Optional[str] = None
+    gateway_id: Optional[int] = None
+    stngw_id: Optional[str] = None
+    station_id: Optional[int] = None
+    station_code: Optional[str] = None
+    station_name: Optional[str] = None
+    asset_id: Optional[int] = None
+    asset_number_code: Optional[str] = None
+
+
 class AlertFiltersResponse(BaseModel):
     zones: List[DropdownOption]
     divisions: List[DropdownOption]
@@ -969,6 +1006,8 @@ class AlertFiltersResponse(BaseModel):
     roles: List[AlertFilterOption] = []
     card_types: List[AlertFilterOption] = []
     gateways: List[DropdownOption] = []
+    slave_cards: List[SlaveCardFilterOption] = []
+    channel_assignments: List[ChannelFilterOption] = []
 
 
 # ─── Thresholds ───────────────────────────────────────────────────────────────
