@@ -8,7 +8,7 @@ from typing import List, Optional, Any, Union
 
 from app.database import get_db
 from app.services.websocket_manager import safe_notify_dashboard
-from app.models.models import Gateway, Telemetry, Zone, Division, Station, AssetParameter, User
+from app.models.models import Gateway, Telemetry, Zone, Division, Station, AssetParameter, User, SlaveCard, Asset
 from app.models.schemas import (
     GatewayDataPayload,
     TelemetryResponse,
@@ -694,6 +694,53 @@ def update_gateway(
         "status": True,
         "message": "Gateway updated successfully",
         "data": gateway
+    }
+
+
+@router.delete("/{stngw_id}", response_model=StandardResponse[Optional[dict]])
+def delete_gateway(
+    stngw_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Safely delete a registered gateway if it has no dependent slave cards, assets, or telemetry.
+    """
+    clean_stngw_id = stngw_id.upper().strip()
+    gateway = _check_stngw_id_access(clean_stngw_id, current_user, db, action="write")
+    if not gateway:
+        raise HTTPException(status_code=404, detail=f"Gateway '{clean_stngw_id}' not found")
+
+    # Dependency check: Slave Cards
+    slave_cards_count = db.query(SlaveCard).filter(SlaveCard.gateway_id == gateway.id).count()
+
+    # Dependency check: Assets
+    assets_count = db.query(Asset).filter(Asset.station_gateway_id == gateway.stngw_id).count()
+
+    # Dependency check: Telemetry
+    telemetry_count = db.query(Telemetry).filter(Telemetry.gateway_id == gateway.id).count()
+
+    reasons = []
+    if slave_cards_count > 0:
+        reasons.append(f"{slave_cards_count} slave card(s)")
+    if assets_count > 0:
+        reasons.append(f"{assets_count} assigned asset(s)")
+    if telemetry_count > 0:
+        reasons.append(f"{telemetry_count} telemetry record(s)")
+
+    if reasons:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot delete gateway '{clean_stngw_id}': It has associated {', '.join(reasons)}. Please remove these dependencies before deleting the gateway."
+        )
+
+    db.delete(gateway)
+    db.commit()
+    safe_notify_dashboard("gateway_deleted")
+    return {
+        "status": True,
+        "message": f"Gateway '{clean_stngw_id}' deleted successfully",
+        "data": None
     }
 
 

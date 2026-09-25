@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.database import Base, get_db
 from app.auth_utils import get_current_user
-from app.models.models import Gateway, Station, Division, Zone, User, Role
+from app.models.models import Gateway, Station, Division, Zone, User, Role, SlaveCard, Asset
 from app.routers.gateway import _decode_and_resolve_hierarchy, _resolve_station_from_stngw_id
 
 
@@ -350,3 +350,40 @@ def test_put_update_gateway():
     data = res.json()["data"]
     assert data["stngw_id"] == test_gw_id
     assert data["imei"] == updated_imei
+
+
+def test_delete_gateway_success_and_protection():
+    db = TestingSessionLocal()
+    # 1. Test clean deletion
+    clean_gw_id = "0102030D"
+    gw1 = Gateway(stngw_id=clean_gw_id, station_id=1)
+    db.add(gw1)
+    db.commit()
+
+    del_res = client.delete(f"/gateway/{clean_gw_id}")
+    assert del_res.status_code == 200
+    assert del_res.json()["status"] is True
+    # Ensure it no longer exists
+    assert db.query(Gateway).filter(Gateway.stngw_id == clean_gw_id).first() is None
+
+    # 2. Test deletion blocked when slave card is attached
+    protected_gw_id = "0102030E"
+    gw2 = Gateway(stngw_id=protected_gw_id, station_id=1)
+    db.add(gw2)
+    db.commit()
+    db.refresh(gw2)
+
+    sc = SlaveCard(gateway_id=gw2.id, card_address="91", card_type="Voltage")
+    db.add(sc)
+    db.commit()
+
+    blocked_res = client.delete(f"/gateway/{protected_gw_id}")
+    assert blocked_res.status_code == 400
+    msg = blocked_res.json().get("message") or blocked_res.json().get("detail")
+    assert "slave card(s)" in msg
+
+    # 3. Test 404 for non-existent gateway
+    not_found = client.delete("/gateway/99999999")
+    assert not_found.status_code == 404
+
+    db.close()
