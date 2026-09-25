@@ -2,7 +2,7 @@ import json
 from datetime import datetime, timedelta
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, or_
 from typing import List, Optional, Any, Union
 
@@ -16,6 +16,7 @@ from app.models.schemas import (
     GatewayListResponse,
     GatewayCreate,
     LinkStationRequest,
+    GatewayHierarchyPreviewResponse,
     StandardResponse,
 )
 from app.auth_utils import get_current_user
@@ -49,36 +50,142 @@ def _offset_event_timestamp(first_ts: str, sample_index: int, interval_ms: int) 
         return first_ts
 
 
+def _decode_and_resolve_hierarchy(stngw_id: str, db: Session) -> dict:
+    """
+    Decodes an 8-char stngw_id (ZZ DD SS GG) and resolves the database hierarchy:
+    Zone -> Division -> Station -> Gateway Sequence Number.
+    """
+    cleaned = (stngw_id or "").strip().upper()
+    if len(cleaned) != 8 or not all(c in "0123456789ABCDEF" for c in cleaned):
+        return {
+            "stngw_id": cleaned,
+            "zone_hex": "",
+            "division_hex": "",
+            "station_hex": "",
+            "gateway_number_hex": "",
+            "gateway_number": 0,
+            "is_valid": False,
+            "can_register": False,
+            "resolved_station_id": None,
+            "zone": None,
+            "division": None,
+            "station": None,
+            "error": "Gateway ID must be exactly 8 hexadecimal characters (0-9, A-F)",
+        }
+
+    zone_hex = cleaned[0:2]
+    div_hex = cleaned[2:4]
+    station_hex = cleaned[4:6]
+    gw_num_hex = cleaned[6:8]
+    gw_num = int(gw_num_hex, 16)
+
+    zone = db.query(Zone).filter(Zone.zone_id_hex == zone_hex).first()
+    if not zone:
+        return {
+            "stngw_id": cleaned,
+            "zone_hex": zone_hex,
+            "division_hex": div_hex,
+            "station_hex": station_hex,
+            "gateway_number_hex": gw_num_hex,
+            "gateway_number": gw_num,
+            "is_valid": False,
+            "can_register": False,
+            "resolved_station_id": None,
+            "zone": None,
+            "division": None,
+            "station": None,
+            "error": f"Zone with hex code '{zone_hex}' does not exist in the database.",
+        }
+
+    zone_info = {
+        "id": zone.id,
+        "code": zone.zone_code,
+        "name": zone.zone_name,
+        "hex": zone_hex,
+    }
+
+    division = db.query(Division).filter(
+        Division.zone_id == zone.id,
+        Division.division_id_hex == div_hex,
+    ).first()
+    if not division:
+        return {
+            "stngw_id": cleaned,
+            "zone_hex": zone_hex,
+            "division_hex": div_hex,
+            "station_hex": station_hex,
+            "gateway_number_hex": gw_num_hex,
+            "gateway_number": gw_num,
+            "is_valid": False,
+            "can_register": False,
+            "resolved_station_id": None,
+            "zone": zone_info,
+            "division": None,
+            "station": None,
+            "error": f"Division with hex code '{div_hex}' does not exist under Zone '{zone.zone_code}'.",
+        }
+
+    div_info = {
+        "id": division.id,
+        "code": division.division_code,
+        "name": division.division_name,
+        "hex": div_hex,
+    }
+
+    station = db.query(Station).filter(
+        Station.division_id == division.id,
+        Station.station_id_hex == station_hex,
+    ).first()
+    if not station:
+        return {
+            "stngw_id": cleaned,
+            "zone_hex": zone_hex,
+            "division_hex": div_hex,
+            "station_hex": station_hex,
+            "gateway_number_hex": gw_num_hex,
+            "gateway_number": gw_num,
+            "is_valid": False,
+            "can_register": False,
+            "resolved_station_id": None,
+            "zone": zone_info,
+            "division": div_info,
+            "station": None,
+            "error": f"Station with hex code '{station_hex}' does not exist under Division '{division.division_code}'.",
+        }
+
+    station_info = {
+        "id": station.id,
+        "code": station.station_code,
+        "name": station.station_name,
+        "hex": station_hex,
+    }
+
+    return {
+        "stngw_id": cleaned,
+        "zone_hex": zone_hex,
+        "division_hex": div_hex,
+        "station_hex": station_hex,
+        "gateway_number_hex": gw_num_hex,
+        "gateway_number": gw_num,
+        "is_valid": True,
+        "can_register": True,
+        "resolved_station_id": station.id,
+        "zone": zone_info,
+        "division": div_info,
+        "station": station_info,
+        "error": None,
+    }
+
+
 def _resolve_station_from_stngw_id(stngw_id: str, db: Session) -> int | None:
     """
     Decode the 8-char stngw_id and return the matching Station.id if found.
     stngw_id format: ZZ DD SS GG
       ZZ = zone_id_hex, DD = division_id_hex, SS = station_id_hex, GG = gateway number
     """
-    if len(stngw_id) != 8:
-        return None
     try:
-        zone_hex    = stngw_id[0:2]
-        div_hex     = stngw_id[2:4]
-        station_hex = stngw_id[4:6]
-
-        zone = db.query(Zone).filter(Zone.zone_id_hex == zone_hex).first()
-        if not zone:
-            return None
-
-        division = db.query(Division).filter(
-            Division.zone_id == zone.id,
-            Division.division_id_hex == div_hex,
-        ).first()
-        if not division:
-            return None
-
-        station = db.query(Station).filter(
-            Station.division_id == division.id,
-            Station.station_id_hex == station_hex,
-        ).first()
-
-        return station.id if station else None
+        res = _decode_and_resolve_hierarchy(stngw_id, db)
+        return res.get("resolved_station_id")
     except Exception:
         return None
 
@@ -385,6 +492,26 @@ def get_gateway_telemetry(
     }
 
 
+@router.get("/preview/{stngw_id}", response_model=StandardResponse[GatewayHierarchyPreviewResponse])
+@router.get("/validate-hierarchy/{stngw_id}", response_model=StandardResponse[GatewayHierarchyPreviewResponse])
+def preview_gateway_hierarchy(
+    stngw_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Decodes and validates the 8-character stngw_id hierarchy in real-time.
+    Returns decoded Zone, Division, Station, and Gateway sequence number.
+    Does not write to the database.
+    """
+    res = _decode_and_resolve_hierarchy(stngw_id, db)
+    return {
+        "status": res["is_valid"],
+        "message": "Hierarchy resolved successfully" if res["is_valid"] else (res["error"] or "Resolution failed"),
+        "data": res
+    }
+
+
 @router.post("/", response_model=StandardResponse[GatewayResponse], status_code=status.HTTP_201_CREATED)
 @router.post("", response_model=StandardResponse[GatewayResponse], status_code=status.HTTP_201_CREATED)
 def create_gateway(
@@ -394,8 +521,8 @@ def create_gateway(
 ):
     """
     Manually provision/register a new Station Gateway.
-    If station_id is not explicitly provided, attempts to auto-resolve
-    the station from the 4-byte stngw_id hierarchy (Zone, Division, Station).
+    Strictly validates stngw_id (ZZ DD SS GG) and auto-resolves the station
+    hierarchy (Zone -> Division -> Station) from the database.
     """
     stngw_id = payload.stngw_id.upper().strip()
 
@@ -407,21 +534,36 @@ def create_gateway(
             detail=f"Gateway with ID '{stngw_id}' already exists."
         )
 
-    # 2. Station assignment
-    station_id = payload.station_id
-    if station_id:
-        stn = db.query(Station).filter(Station.id == station_id).first()
-        if not stn:
-            raise HTTPException(status_code=404, detail=f"Station with ID {station_id} not found.")
-    else:
-        # Fallback: auto-resolve station from hex hierarchy
-        station_id = _resolve_station_from_stngw_id(stngw_id, db)
+    # 2. Prevent duplicate IMEI if provided
+    imei_val = payload.imei.strip() if payload.imei else None
+    if imei_val:
+        existing_imei = db.query(Gateway).filter(Gateway.imei == imei_val).first()
+        if existing_imei:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Gateway with IMEI '{imei_val}' already exists (Gateway ID '{existing_imei.stngw_id}')."
+            )
 
-    # 3. Create Gateway row
+    # 3. Hierarchy validation and station resolution
+    hierarchy = _decode_and_resolve_hierarchy(stngw_id, db)
+    if not hierarchy["can_register"] or not hierarchy["resolved_station_id"]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot register gateway: {hierarchy['error']}"
+        )
+
+    resolved_station_id = hierarchy["resolved_station_id"]
+    if payload.station_id and payload.station_id != resolved_station_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Provided station_id {payload.station_id} conflicts with the decoded station hierarchy {resolved_station_id} for '{stngw_id}'."
+        )
+
+    # 4. Create Gateway row
     gateway = Gateway(
         stngw_id=stngw_id,
-        imei=payload.imei.strip() if payload.imei else None,
-        station_id=station_id,
+        imei=imei_val,
+        station_id=resolved_station_id,
         mtls_cn=payload.mtls_cn.strip() if payload.mtls_cn else None,
     )
     db.add(gateway)
@@ -445,29 +587,29 @@ def link_gateway_station(
     current_user: User = Depends(get_current_user),
 ):
     """
-    Link a gateway to a station.
-    If payload with station_id is provided, links directly to that station.
-    Otherwise attempts auto-assignment by decoding stngw_id.
+    Link or re-link a gateway to its authoritative station derived from stngw_id.
+    Validates that the target station matches the encoded hierarchy.
     """
-    gateway = _check_stngw_id_access(stngw_id, current_user, db, action="write")
+    clean_stngw_id = stngw_id.upper().strip()
+    gateway = _check_stngw_id_access(clean_stngw_id, current_user, db, action="write")
     if not gateway:
-        raise HTTPException(status_code=404, detail=f"Gateway '{stngw_id}' not found")
+        raise HTTPException(status_code=404, detail=f"Gateway '{clean_stngw_id}' not found")
 
-    station_id = payload.station_id if payload and payload.station_id else None
-    if station_id:
-        stn = db.query(Station).filter(Station.id == station_id).first()
-        if not stn:
-            raise HTTPException(status_code=404, detail=f"Station with ID {station_id} not found")
-    else:
-        station_id = _resolve_station_from_stngw_id(stngw_id.upper(), db)
-        if station_id is None:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Could not resolve a station for stngw_id '{stngw_id}'. "
-                       "Make sure the zone, division, and station exist in the database."
-            )
+    hierarchy = _decode_and_resolve_hierarchy(clean_stngw_id, db)
+    if not hierarchy["can_register"] or not hierarchy["resolved_station_id"]:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Could not resolve station for '{clean_stngw_id}': {hierarchy['error']}"
+        )
 
-    gateway.station_id = station_id
+    resolved_station_id = hierarchy["resolved_station_id"]
+    if payload and payload.station_id and payload.station_id != resolved_station_id:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot link gateway '{clean_stngw_id}' to station ID {payload.station_id}. It is encoded to station ID {resolved_station_id} ({hierarchy['station']['name']})."
+        )
+
+    gateway.station_id = resolved_station_id
     db.commit()
     db.refresh(gateway)
     safe_notify_dashboard("gateway_updated")
@@ -495,7 +637,9 @@ def list_gateways(
     current_user: User = Depends(get_current_user),
 ):
     """List all registered gateways with comprehensive filtering and pagination."""
-    q = db.query(Gateway)
+    q = db.query(Gateway).options(
+        joinedload(Gateway.station).joinedload(Station.division).joinedload(Division.zone)
+    )
 
     joined_station = False
     joined_division = False

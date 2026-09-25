@@ -1,4 +1,4 @@
-from sqlalchemy import Boolean, Column, Integer, String, Float, DateTime, ForeignKey, Text, UniqueConstraint, Enum, JSON, Index
+from sqlalchemy import Boolean, Column, Integer, String, Float, DateTime, ForeignKey, Text, UniqueConstraint, Enum, JSON, Index, text
 from sqlalchemy.orm import relationship
 from datetime import datetime,UTC
 from typing import Optional
@@ -645,6 +645,13 @@ class AssetParameter(Base):
 
     __table_args__ = (
         Index('idx_asset_params_lookup', 'asset_id', 'para_id'),
+        Index(
+            'uq_asset_param_active_assignment',
+            'slave_card_id',
+            'channel_number',
+            unique=True,
+            postgresql_where=text("is_assigned = TRUE AND slave_card_id IS NOT NULL AND channel_number IS NOT NULL")
+        ),
     )
 
 

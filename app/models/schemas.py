@@ -288,6 +288,41 @@ class GatewayCreate(BaseModel):
             raise ValueError("Gateway ID must be exactly 8 hexadecimal characters (0-9, A-F)")
         return cleaned
 
+    @field_validator("imei")
+    @classmethod
+    def validate_imei(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return None
+        cleaned = v.strip()
+        if not cleaned:
+            return None
+        if not (10 <= len(cleaned) <= 20 and cleaned.isdigit()):
+            raise ValueError("IMEI must be a valid numeric string between 10 and 20 digits")
+        return cleaned
+
+
+class DecodedHierarchyItem(BaseModel):
+    id: Optional[int] = None
+    code: Optional[str] = None
+    name: Optional[str] = None
+    hex: str
+
+
+class GatewayHierarchyPreviewResponse(BaseModel):
+    stngw_id: str
+    zone_hex: str
+    division_hex: str
+    station_hex: str
+    gateway_number_hex: str
+    gateway_number: int
+    is_valid: bool
+    can_register: bool
+    resolved_station_id: Optional[int] = None
+    zone: Optional[DecodedHierarchyItem] = None
+    division: Optional[DecodedHierarchyItem] = None
+    station: Optional[DecodedHierarchyItem] = None
+    error: Optional[str] = None
+
 
 class LinkStationRequest(BaseModel):
     station_id: Optional[int] = None
@@ -301,12 +336,17 @@ class GatewayResponse(BaseModel):
     created_at: Optional[datetime] = None
     station_code: Optional[str] = None
     station_name: Optional[str] = None
+    station_id_hex: Optional[str] = None
     division_id: Optional[int] = None
     division_code: Optional[str] = None
     division_name: Optional[str] = None
+    division_id_hex: Optional[str] = None
     zone_id: Optional[int] = None
     zone_code: Optional[str] = None
     zone_name: Optional[str] = None
+    zone_id_hex: Optional[str] = None
+    gateway_number: Optional[int] = None
+    gateway_number_hex: Optional[str] = None
     status: Optional[str] = None
 
     @model_validator(mode="before")
@@ -320,13 +360,26 @@ class GatewayResponse(BaseModel):
             st_id = getattr(data, "station_id", None)
             st_code = getattr(stn, "station_code", None) if stn else None
             st_name = getattr(stn, "station_name", None) if stn else None
+            st_hex = getattr(stn, "station_id_hex", None) if stn else None
             d_id = getattr(div, "id", None) if div else None
             d_code = getattr(div, "division_code", None) if div else None
             d_name = getattr(div, "division_name", None) if div else None
+            d_hex = getattr(div, "division_id_hex", None) if div else None
             z_id = getattr(zn, "id", None) if zn else None
             z_code = getattr(zn, "zone_code", None) if zn else None
             z_name = getattr(zn, "zone_name", None) if zn else None
+            z_hex = getattr(zn, "zone_id_hex", None) if zn else None
             status_val = "Linked" if st_id is not None else "Unlinked"
+
+            gw_id_str = getattr(data, "stngw_id", "") or ""
+            gw_num = None
+            gw_hex = None
+            if len(gw_id_str) == 8:
+                try:
+                    gw_hex = gw_id_str[6:8]
+                    gw_num = int(gw_hex, 16)
+                except ValueError:
+                    pass
 
             return {
                 "id": int(data.id) if data.id is not None else 0,
@@ -336,18 +389,30 @@ class GatewayResponse(BaseModel):
                 "created_at": data.created_at,
                 "station_code": st_code,
                 "station_name": st_name,
+                "station_id_hex": st_hex,
                 "division_id": int(d_id) if d_id is not None else None,
                 "division_code": d_code,
                 "division_name": d_name,
+                "division_id_hex": d_hex,
                 "zone_id": int(z_id) if z_id is not None else None,
                 "zone_code": z_code,
                 "zone_name": z_name,
+                "zone_id_hex": z_hex,
+                "gateway_number": gw_num,
+                "gateway_number_hex": gw_hex,
                 "status": status_val,
             }
         else:
             st_id = data.get("station_id")
             if "status" not in data:
                 data["status"] = "Linked" if st_id is not None else "Unlinked"
+            gw_id_str = data.get("stngw_id", "") or ""
+            if len(gw_id_str) == 8 and data.get("gateway_number") is None:
+                try:
+                    data["gateway_number_hex"] = gw_id_str[6:8]
+                    data["gateway_number"] = int(gw_id_str[6:8], 16)
+                except ValueError:
+                    pass
             return data
 
     class Config:
@@ -1455,6 +1520,18 @@ class SlaveCardBase(BaseModel):
     card_address: str = Field(..., pattern=r"^[0-9A-Fa-f]{1,2}$", validation_alias=AliasChoices('card_address', 'cardAddress'), description="1-byte hex card address, e.g. '81'")
     card_type: Optional[str] = Field(None, max_length=20, validation_alias=AliasChoices('card_type', 'cardType'), description="e.g. 'Voltage', 'Analog', 'DI'")
 
+    @field_validator("card_address", mode="before")
+    @classmethod
+    def normalize_card_address(cls, v: Any) -> str:
+        if v is None:
+            return v
+        if isinstance(v, int):
+            v = str(v)
+        v_str = str(v).strip().upper()
+        if v_str.startswith("0X"):
+            v_str = v_str[2:]
+        return v_str
+
 class SlaveCardCreate(SlaveCardBase):
     pass
 
@@ -1462,6 +1539,18 @@ class SlaveCardUpdate(BaseModel):
     gateway_id: Optional[int] = Field(None, validation_alias=AliasChoices('gateway_id', 'gatewayId'))
     card_address: Optional[str] = Field(None, pattern=r"^[0-9A-Fa-f]{1,2}$", validation_alias=AliasChoices('card_address', 'cardAddress'))
     card_type: Optional[str] = Field(None, max_length=20, validation_alias=AliasChoices('card_type', 'cardType'))
+
+    @field_validator("card_address", mode="before")
+    @classmethod
+    def normalize_card_address(cls, v: Any) -> Optional[str]:
+        if v is None:
+            return v
+        if isinstance(v, int):
+            v = str(v)
+        v_str = str(v).strip().upper()
+        if v_str.startswith("0X"):
+            v_str = v_str[2:]
+        return v_str
 
 class SlaveCardResponse(SlaveCardBase):
     id: int
@@ -1623,6 +1712,125 @@ class StandardResponse(BaseModel, Generic[T]):
             if data.get("status") is not False:
                 data["message"] = "Success"
         return data
+
+
+# ─── Channel Assignment ───────────────────────────────────────────────────────
+
+class ChannelAssignmentCreate(BaseModel):
+    gateway_id: Optional[int] = Field(None, validation_alias=AliasChoices('gateway_id', 'gatewayId'))
+    slave_card_id: int = Field(..., validation_alias=AliasChoices('slave_card_id', 'slaveCardId'))
+    channel_number: str = Field(..., max_length=15, validation_alias=AliasChoices('channel_number', 'channelNumber', 'channel'))
+    asset_id: int = Field(..., validation_alias=AliasChoices('asset_id', 'assetId'))
+    para_id: Optional[str] = Field(None, pattern=r"^[0-9A-Fa-f]{7,8}$", validation_alias=AliasChoices('para_id', 'paraId'))
+    prloc: Optional[str] = Field(None, max_length=50, validation_alias=AliasChoices('prloc', 'location_box', 'locationBox'))
+
+
+class ChannelAssignmentUpdate(BaseModel):
+    gateway_id: Optional[int] = Field(None, validation_alias=AliasChoices('gateway_id', 'gatewayId'))
+    slave_card_id: Optional[int] = Field(None, validation_alias=AliasChoices('slave_card_id', 'slaveCardId'))
+    asset_id: Optional[int] = Field(None, validation_alias=AliasChoices('asset_id', 'assetId'))
+    channel_number: Optional[str] = Field(None, max_length=15, validation_alias=AliasChoices('channel_number', 'channelNumber', 'channel'))
+    para_id: Optional[str] = Field(None, pattern=r"^[0-9A-Fa-f]{7,8}$", validation_alias=AliasChoices('para_id', 'paraId'))
+    prloc: Optional[str] = Field(None, max_length=50, validation_alias=AliasChoices('prloc', 'location_box', 'locationBox'))
+    is_assigned: Optional[bool] = Field(None, validation_alias=AliasChoices('is_assigned', 'isAssigned'))
+
+
+class ChannelAssignmentResponse(BaseModel):
+    id: int
+    zone_id: Optional[int] = None
+    zone_code: Optional[str] = None
+    zone_name: Optional[str] = None
+    division_id: Optional[int] = None
+    division_code: Optional[str] = None
+    division_name: Optional[str] = None
+    station_id: Optional[int] = None
+    station_code: Optional[str] = None
+    station_name: Optional[str] = None
+    gateway_id: Optional[int] = None
+    stngw_id: Optional[str] = None
+    slave_card_id: Optional[int] = None
+    card_number: Optional[str] = None
+    card_address: Optional[str] = None
+    card_type: Optional[str] = None
+    channel: Optional[str] = None
+    channel_number: Optional[str] = None
+    para_id: str
+    asset_id: Optional[int] = None
+    asset_number_code: Optional[str] = None
+    asset_name: Optional[str] = None
+    prloc: Optional[str] = None
+    location_box: Optional[str] = None
+    is_assigned: bool = True
+    created_at: datetime
+    updated_at: datetime
+
+    # CamelCase aliases for frontend
+    gatewayId: Optional[int] = None
+    stngwId: Optional[str] = None
+    slaveCardId: Optional[int] = None
+    cardNumber: Optional[str] = None
+    cardAddress: Optional[str] = None
+    cardType: Optional[str] = None
+    channelNumber: Optional[str] = None
+    paraId: Optional[str] = None
+    assetId: Optional[int] = None
+    assetNumberCode: Optional[str] = None
+    assetName: Optional[str] = None
+    locationBox: Optional[str] = None
+    isAssigned: bool = True
+    updatedAt: Optional[str] = None
+
+    @model_validator(mode="after")
+    def populate_aliases(self) -> "ChannelAssignmentResponse":
+        self.gatewayId = self.gateway_id
+        self.stngwId = self.stngw_id
+        self.slaveCardId = self.slave_card_id
+        self.cardNumber = self.card_number
+        self.cardAddress = self.card_address
+        self.cardType = self.card_type
+        self.channelNumber = self.channel_number or self.channel
+        self.channel = self.channel or self.channel_number
+        self.paraId = self.para_id
+        self.assetId = self.asset_id
+        self.assetNumberCode = self.asset_number_code
+        self.assetName = self.asset_name
+        self.locationBox = self.prloc
+        self.isAssigned = self.is_assigned
+        self.updatedAt = self.updated_at.isoformat() if self.updated_at else None
+        return self
+
+    class Config:
+        from_attributes = True
+
+
+class ChannelAssignmentListResponse(BaseModel):
+    total: int
+    page: int
+    page_size: int
+    total_pages: int
+    rows: List[ChannelAssignmentResponse]
+
+
+class AvailableChannelItem(BaseModel):
+    channel: str
+    channel_number: str
+    channel_index: int
+    is_assigned: bool
+    current_para_id: Optional[str] = None
+    current_asset_id: Optional[int] = None
+    current_asset_number_code: Optional[str] = None
+    current_prloc: Optional[str] = None
+
+
+class AvailableChannelsResponse(BaseModel):
+    slave_card_id: int
+    card_address: str
+    card_type: Optional[str] = None
+    total_channels: int
+    assigned_count: int
+    available_count: int
+    channels: List[AvailableChannelItem]
+
 
 
 
