@@ -321,7 +321,7 @@ def update_slave_card(
     }
 
 
-@router.delete("/{slave_card_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{slave_card_id}", status_code=status.HTTP_200_OK, response_model=StandardResponse[None])
 def delete_slave_card(
     slave_card_id: int,
     db: Session = Depends(get_db),
@@ -329,12 +329,21 @@ def delete_slave_card(
 ):
     """Permanently delete a Slave Card. Referenced Channels will have their slave_card_id set to NULL."""
     card = _check_slave_card_ownership(slave_card_id, current_user, db, action="write")
-        
+
+    stngw_id = card.gateway.stngw_id if card.gateway else str(slave_card_id)
+    card_address = card.card_address
+
     # Unlink Channels referencing this slave card
     db.query(AssetParameter).filter(AssetParameter.slave_card_id == slave_card_id).update(
         {"slave_card_id": None}
     )
-    
+
     db.delete(card)
     db.commit()
+
+    return {
+        "status": True,
+        "message": f"Slave card '{stngw_id}/{card_address}' deleted successfully",
+        "data": None,
+    }
 
